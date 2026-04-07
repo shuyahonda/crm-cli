@@ -13,8 +13,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 
 	"github.com/AzureAD/microsoft-authentication-library-for-go/apps/confidential"
@@ -79,6 +77,10 @@ func (p *Provider) newPublicClient() (public.Client, error) {
 // Edge などの管理対象ブラウザが Windows WAM (Web Account Manager) 経由で
 // デバイスの PRT (Primary Refresh Token) を使用するため、
 // デバイスコンプライアンスを要求する Conditional Access ポリシーを通過できます。
+//
+// ブラウザの起動は MSAL 内蔵の pkg/browser に委譲します。
+// Windows では rundll32 url.dll,FileProtocolHandler を使用するため、
+// OAuth2 URL に含まれる "&" が cmd によってコマンド区切りとして解釈される問題を回避します。
 func (p *Provider) tokenViaInteractive(ctx context.Context) (string, error) {
 	app, err := p.newPublicClient()
 	if err != nil {
@@ -98,9 +100,8 @@ func (p *Provider) tokenViaInteractive(ctx context.Context) (string, error) {
 	}
 
 	// ブラウザを開いてインタラクティブ認証
-	result, err := app.AcquireTokenInteractive(ctx, scopes,
-		public.WithOpenURL(openBrowser),
-	)
+	// WithOpenURL を使わず MSAL 内蔵のブラウザ起動ロジックに任せる
+	result, err := app.AcquireTokenInteractive(ctx, scopes)
 	if err != nil {
 		return "", fmt.Errorf("MSAL: interactive authentication failed: %w", err)
 	}
@@ -210,17 +211,3 @@ func (p *Provider) tokenViaClientCredentials(ctx context.Context) (string, error
 	return result.AccessToken, nil
 }
 
-// openBrowser opens the given URL in the system default browser.
-// Windows では start コマンド、macOS では open、Linux では xdg-open を使用。
-func openBrowser(url string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
-	case "darwin":
-		cmd = exec.Command("open", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
-	return cmd.Start()
-}
