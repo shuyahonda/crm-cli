@@ -19,19 +19,27 @@ GitHub Copilot から MCP (Model Context Protocol) 経由で呼び出すこと�
 # 例: C:\Users\<yourname>\bin\crm-cli.exe
 ```
 
-### ソースからビルド
+### ソースからビルド（Go が必要）
 
-```bash
-# Windows ARM64
-make build-windows-arm64   # → crm-cli-windows-arm64.exe
+PowerShell で直接ビルドできます（`make` は不要）。
 
-# その他
-make build-windows-amd64
-make build-linux-amd64
-make build-macos-arm64
+```powershell
+# Windows ARM64（メインターゲット）
+$env:GOOS = "windows"; $env:GOARCH = "arm64"
+go build -o crm-cli.exe .
+
+# Windows AMD64
+$env:GOOS = "windows"; $env:GOARCH = "amd64"
+go build -o crm-cli.exe .
 ```
 
-Go 1.21 以上が必要です。
+`make` が使える環境（WSL / Git Bash）では `Makefile` も利用できます。
+
+```bash
+make build-windows-arm64   # → crm-cli-windows-arm64.exe
+```
+
+Go 1.21 以上が必要です。[golang.org/dl](https://golang.org/dl/) からインストールしてください。
 
 ## 設定
 
