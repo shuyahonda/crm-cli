@@ -43,26 +43,41 @@ Go 1.21 以上が必要です。[golang.org/dl](https://golang.org/dl/) から�
 
 ## 設定
 
-### 方法 1: 環境変数（推奨）
+### 方法 1: 設定ファイル（推奨・永続設定）
+
+以下のコマンドで設定ファイルを作成します（毎回環境変数を設定する必要がなくなります）。
 
 ```powershell
-$env:CRM_BASE_URL  = "https://yourorg.crm.dynamics.com"
-$env:CRM_AUTH_FLOW = "device_code"   # 認証方式（下記参照）
-```
-
-### 方法 2: 設定ファイル
-
-`crm-cli.yaml.example` をコピーして編集します。
-
-```powershell
-# ユーザーホームに配置
 mkdir "$env:USERPROFILE\.config\crm-cli"
-copy crm-cli.yaml.example "$env:USERPROFILE\.config\crm-cli\crm-cli.yaml"
+@"
+crm_base_url: "https://yourorg.crm.dynamics.com"
+auth_flow: "device_code"
+"@ | Out-File "$env:USERPROFILE\.config\crm-cli\crm-cli.yaml" -Encoding UTF8
 ```
+
+詳細な設定例は `crm-cli.yaml.example` を参照してください。
 
 配置場所の優先順位:
 1. カレントディレクトリの `crm-cli.yaml`
 2. `%USERPROFILE%\.config\crm-cli\crm-cli.yaml`
+
+### 方法 2: 環境変数
+
+PowerShell と cmd.exe では構文が異なります。
+
+```powershell
+# PowerShell
+$env:CRM_BASE_URL  = "https://yourorg.crm.dynamics.com"
+$env:CRM_AUTH_FLOW = "device_code"
+```
+
+```cmd
+:: コマンドプロンプト (cmd.exe)
+set CRM_BASE_URL=https://yourorg.crm.dynamics.com
+set CRM_AUTH_FLOW=device_code
+```
+
+> 環境変数はターミナルを閉じるとリセットされます。永続化するには設定ファイルを使ってください。
 
 ## 認証方式
 
