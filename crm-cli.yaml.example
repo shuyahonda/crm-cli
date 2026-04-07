@@ -10,19 +10,28 @@
 crm_base_url: "https://yourorg.crm.dynamics.com"
 
 # =============================================================================
-# OPTION 1: Device Code Flow (recommended — no app registration required)
+# OPTION 1: Interactive Flow（推奨 — Intune 管理デバイス向け）
 # =============================================================================
-# Open a browser, sign in with your Microsoft/CRM account.
-# Uses Microsoft's pre-registered Dynamics CRM public client automatically.
+# ブラウザを直接開いてサインイン。Windows の WAM (Web Account Manager) 経由で
+# デバイスの PRT が使われるため、デバイスコンプライアンスの CA ポリシーを通過。
 #
-auth_flow: "device_code"
-# tenant_id is optional — use your domain or GUID, or omit to use "common"
+auth_flow: "interactive"
+# tenant_id は省略可（省略時は "common" を使用）
 # tenant_id: "yourorg.onmicrosoft.com"
 
 # =============================================================================
-# OPTION 2: Username / Password (no app registration required, no MFA)
+# OPTION 2: Device Code Flow（アプリ登録不要・ブラウザが別端末でもよい場合）
 # =============================================================================
-# Direct credential login. Does NOT work if MFA is enforced on your account.
+# コードが表示されるので、ブラウザで https://microsoft.com/devicelogin にアクセスして入力。
+# Intune管理デバイスではデバイスコンプライアンス CA に引っかかる場合があります。
+#
+# auth_flow: "device_code"
+# tenant_id: "yourorg.onmicrosoft.com"   # optional
+
+# =============================================================================
+# OPTION 3: Username / Password（アプリ登録不要・MFA なし環境向け）
+# =============================================================================
+# MFA が有効なアカウントでは使用不可。
 #
 # auth_flow: "password"
 # username: "yourname@yourorg.onmicrosoft.com"
@@ -30,9 +39,9 @@ auth_flow: "device_code"
 # tenant_id: "yourorg.onmicrosoft.com"   # optional
 
 # =============================================================================
-# OPTION 3: Client Credentials (requires app registration by admin)
+# OPTION 4: Client Credentials（管理者によるアプリ登録が必要）
 # =============================================================================
-# Service-to-service, no user interaction. Requires admin to register an app.
+# サービス間通信向け。Azure AD へのアプリ登録が必要です。
 #
 # auth_flow: "client_credentials"
 # tenant_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"

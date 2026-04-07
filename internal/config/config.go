@@ -32,9 +32,10 @@ type Config struct {
 	APIVersion string `mapstructure:"api_version"`  // default: 9.2
 
 	// Auth flow:
-	//   device_code        - browser login, no app registration required (default)
-	//   password           - username/password (ROPC), no app registration required
-	//   client_credentials - service account, requires app registration + secret
+	//   interactive        - ブラウザを直接開く（Intune管理デバイス推奨・デフォルト）
+	//   device_code        - コードをブラウザに入力（アプリ登録不要）
+	//   password           - ユーザー名/パスワード（MFAなし環境向け）
+	//   client_credentials - サービスアカウント（アプリ登録が必要）
 	AuthFlow string `mapstructure:"auth_flow"`
 }
 
@@ -44,7 +45,7 @@ type Config struct {
 const WellKnownDynamicsCRMClientID = "9cee029c-6210-4654-90bb-17e6e9d36617"
 
 const defaultAPIVersion = "9.2"
-const defaultAuthFlow = "device_code"
+const defaultAuthFlow = "interactive"
 
 // Load reads configuration from the config file and environment variables.
 // Priority: env vars > config file > defaults.
@@ -103,8 +104,8 @@ func (c *Config) Validate() error {
 	}
 
 	switch c.AuthFlow {
-	case "device_code":
-		// Only needs tenant_id (can be "common") and client_id (defaulted above)
+	case "interactive", "device_code":
+		// tenant_id は省略可（"common" にフォールバック）
 		if c.TenantID == "" {
 			c.TenantID = "common"
 		}
@@ -126,7 +127,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("client_secret is required for client_credentials auth flow (set CRM_CLIENT_SECRET)")
 		}
 	default:
-		return fmt.Errorf("unsupported auth_flow %q (choose: device_code, password, client_credentials)", c.AuthFlow)
+		return fmt.Errorf("unsupported auth_flow %q (choose: interactive, device_code, password, client_credentials)", c.AuthFlow)
 	}
 
 	return nil

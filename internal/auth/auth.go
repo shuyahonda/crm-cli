@@ -3,15 +3,18 @@
 // https://github.com/AzureAD/microsoft-authentication-library-for-go
 //
 // Supported flows:
-//   - device_code        — browser login, no app registration required
-//   - password (ROPC)    — username/password, no app registration required
-//   - client_credentials — service account, requires app registration
+//   - interactive         — ブラウザを直接開いてサインイン（Intune管理デバイス推奨）
+//   - device_code         — コードをブラウザに入力してサインイン
+//   - password (ROPC)     — ユーザー名/パスワード直接入力（MFAなし環境向け）
+//   - client_credentials  — サービスアカウント（アプリ登録が必要）
 package auth
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/AzureAD/microsoft-authentication-library-for-go/apps/confidential"
@@ -38,6 +41,8 @@ func NewProvider(cfg *config.Config) *Provider {
 // Tokens are cached on disk; silent acquisition is attempted first.
 func (p *Provider) GetToken(ctx context.Context) (string, error) {
 	switch p.cfg.AuthFlow {
+	case "interactive":
+		return p.tokenViaInteractive(ctx)
 	case "device_code":
 		return p.tokenViaDeviceCode(ctx)
 	case "password":
@@ -60,20 +65,29 @@ func (p *Provider) authority() string {
 	return "https://login.microsoftonline.com/" + p.cfg.TenantID
 }
 
-// tokenViaDeviceCode acquires a token using the device code flow.
-// Uses a file cache so the user only authenticates once (refresh token lasts ~90 days).
-func (p *Provider) tokenViaDeviceCode(ctx context.Context) (string, error) {
-	app, err := public.New(p.cfg.ClientID,
+// newPublicClient creates a MSAL public client with file cache.
+func (p *Provider) newPublicClient() (public.Client, error) {
+	return public.New(p.cfg.ClientID,
 		public.WithAuthority(p.authority()),
 		public.WithCache(p.cache),
 	)
+}
+
+// tokenViaInteractive acquires a token by opening the system browser directly.
+//
+// Intune管理デバイスでの推奨フロー。
+// Edge などの管理対象ブラウザが Windows WAM (Web Account Manager) 経由で
+// デバイスの PRT (Primary Refresh Token) を使用するため、
+// デバイスコンプライアンスを要求する Conditional Access ポリシーを通過できます。
+func (p *Provider) tokenViaInteractive(ctx context.Context) (string, error) {
+	app, err := p.newPublicClient()
 	if err != nil {
 		return "", fmt.Errorf("MSAL: failed to create public client: %w", err)
 	}
 
 	scopes := p.scopes()
 
-	// Try silent acquisition first (uses cached refresh token)
+	// サイレント取得を先に試みる（キャッシュ済みトークンの再利用）
 	accounts, err := app.Accounts(ctx)
 	if err == nil && len(accounts) > 0 {
 		result, err := app.AcquireTokenSilent(ctx, scopes,
@@ -81,16 +95,46 @@ func (p *Provider) tokenViaDeviceCode(ctx context.Context) (string, error) {
 		if err == nil {
 			return result.AccessToken, nil
 		}
-		// Silent failed — fall through to interactive
 	}
 
-	// Interactive device code flow
+	// ブラウザを開いてインタラクティブ認証
+	result, err := app.AcquireTokenInteractive(ctx, scopes,
+		public.WithOpenURL(openBrowser),
+	)
+	if err != nil {
+		return "", fmt.Errorf("MSAL: interactive authentication failed: %w", err)
+	}
+
+	return result.AccessToken, nil
+}
+
+// tokenViaDeviceCode acquires a token using the device code flow.
+// Uses a file cache so the user only authenticates once (refresh token lasts ~90 days).
+func (p *Provider) tokenViaDeviceCode(ctx context.Context) (string, error) {
+	app, err := p.newPublicClient()
+	if err != nil {
+		return "", fmt.Errorf("MSAL: failed to create public client: %w", err)
+	}
+
+	scopes := p.scopes()
+
+	// サイレント取得を先に試みる
+	accounts, err := app.Accounts(ctx)
+	if err == nil && len(accounts) > 0 {
+		result, err := app.AcquireTokenSilent(ctx, scopes,
+			public.WithSilentAccount(accounts[0]))
+		if err == nil {
+			return result.AccessToken, nil
+		}
+	}
+
+	// デバイスコードフロー（コードを表示してブラウザで入力）
 	dc, err := app.AcquireTokenByDeviceCode(ctx, scopes)
 	if err != nil {
 		return "", fmt.Errorf("MSAL: device code initiation failed: %w", err)
 	}
 
-	// Print the user message (e.g. "Go to https://... and enter code XXXXX")
+	// ユーザーへの案内メッセージを表示
 	fmt.Fprintf(os.Stderr, "\n%s\n\n", dc.Result.Message)
 
 	result, err := dc.AuthenticationResult(ctx)
@@ -104,17 +148,14 @@ func (p *Provider) tokenViaDeviceCode(ctx context.Context) (string, error) {
 // tokenViaPassword acquires a token using username/password (ROPC).
 // Does not work when MFA is enforced on the account.
 func (p *Provider) tokenViaPassword(ctx context.Context) (string, error) {
-	app, err := public.New(p.cfg.ClientID,
-		public.WithAuthority(p.authority()),
-		public.WithCache(p.cache),
-	)
+	app, err := p.newPublicClient()
 	if err != nil {
 		return "", fmt.Errorf("MSAL: failed to create public client: %w", err)
 	}
 
 	scopes := p.scopes()
 
-	// Try silent acquisition first
+	// サイレント取得を先に試みる
 	accounts, err := app.Accounts(ctx)
 	if err == nil {
 		for _, account := range accounts {
@@ -133,7 +174,7 @@ func (p *Provider) tokenViaPassword(ctx context.Context) (string, error) {
 		p.cfg.Username, p.cfg.Password)
 	if err != nil {
 		return "", fmt.Errorf("MSAL: password authentication failed: %w\n"+
-			"  Hint: if MFA is enforced on your account, use auth_flow: device_code", err)
+			"  Hint: if MFA is enforced on your account, use auth_flow: interactive", err)
 	}
 
 	return result.AccessToken, nil
@@ -154,13 +195,12 @@ func (p *Provider) tokenViaClientCredentials(ctx context.Context) (string, error
 		return "", fmt.Errorf("MSAL: failed to create confidential client: %w", err)
 	}
 
-	// Dynamics 365 client credentials scope uses /.default
+	// client_credentials スコープは /.default を使用
 	base := strings.TrimRight(p.cfg.CRMBaseURL, "/")
 	scopes := []string{base + "/.default"}
 
 	result, err := app.AcquireTokenSilent(ctx, scopes)
 	if err != nil {
-		// Silent failed — acquire fresh token
 		result, err = app.AcquireTokenByCredential(ctx, scopes)
 		if err != nil {
 			return "", fmt.Errorf("MSAL: client credentials token acquisition failed: %w", err)
@@ -168,4 +208,19 @@ func (p *Provider) tokenViaClientCredentials(ctx context.Context) (string, error
 	}
 
 	return result.AccessToken, nil
+}
+
+// openBrowser opens the given URL in the system default browser.
+// Windows では start コマンド、macOS では open、Linux では xdg-open を使用。
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
 }

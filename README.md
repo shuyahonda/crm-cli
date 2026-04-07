@@ -81,17 +81,31 @@ set CRM_AUTH_FLOW=device_code
 
 ## 認証方式
 
-### Device Code（推奨・アプリ登録不要）
+| フロー | アプリ登録 | MFA | Intune CA ポリシー | 用途 |
+|---|---|---|---|---|
+| `interactive` | 不要 | 対応 | **通過可** | **Intune 管理デバイス（推奨）** |
+| `device_code` | 不要 | 対応 | 環境による | ブラウザが別端末でもよい場合 |
+| `password` | 不要 | 非対応 | 環境による | MFA なし環境 |
+| `client_credentials` | **必要** | — | 対象外 | サービス間通信 |
 
-ブラウザで Microsoft アカウントにサインイン。初回のみ操作が必要で、以降はトークンキャッシュが使われます。
+### Interactive（推奨・Intune 管理デバイス向け）
+
+ブラウザを直接開いてサインイン。Windows の WAM (Web Account Manager) 経由でデバイスの PRT が使われるため、**デバイスコンプライアンスを要求する Conditional Access ポリシーを通過**できます。
+
+```yaml
+crm_base_url: "https://yourorg.crm.dynamics.com"
+auth_flow: "interactive"
+# tenant_id は省略可能（省略時は "common" を使用）
+```
+
+### Device Code（アプリ登録不要）
+
+コードが表示されるので、ブラウザで `https://microsoft.com/devicelogin` にアクセスして入力します。Intune のデバイスコンプライアンス CA ポリシーが有効な環境では `interactive` を使ってください。
 
 ```yaml
 crm_base_url: "https://yourorg.crm.dynamics.com"
 auth_flow: "device_code"
-# tenant_id は省略可能（省略時は "common" を使用）
 ```
-
-トークンキャッシュの保存先: `%LOCALAPPDATA%\crm-cli\token_cache.json`
 
 ### Password / ROPC（アプリ登録不要・MFA なし環境向け）
 
@@ -115,6 +129,8 @@ tenant_id:      "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 client_id:      "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 client_secret:  "your-client-secret"
 ```
+
+トークンキャッシュの保存先: `%LOCALAPPDATA%\crm-cli\token_cache.json`
 
 ## CLI コマンド
 
