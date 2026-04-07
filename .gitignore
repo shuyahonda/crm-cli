@@ -1,0 +1,13 @@
+# Build artifacts
+crm-cli
+crm-cli.exe
+crm-cli-*
+*.exe
+
+# Config with secrets
+crm-cli.yaml
+
+# Go
+*.test
+*.out
+vendor/
