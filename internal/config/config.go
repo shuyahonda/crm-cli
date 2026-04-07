@@ -11,20 +11,40 @@ import (
 // Config holds all configuration for the CRM CLI tool.
 type Config struct {
 	// Azure AD / Entra ID settings
-	TenantID     string `mapstructure:"tenant_id"`
-	ClientID     string `mapstructure:"client_id"`
+	// TenantID can be a GUID, your domain (contoso.onmicrosoft.com), or "common".
+	TenantID string `mapstructure:"tenant_id"`
+
+	// ClientID is optional. If omitted, the well-known Dynamics CRM public
+	// client ID (9cee029c-6210-4654-90bb-17e6e9d36617) is used, which does NOT
+	// require any app registration by an admin.
+	ClientID string `mapstructure:"client_id"`
+
+	// ClientSecret is only required for the client_credentials auth flow.
 	ClientSecret string `mapstructure:"client_secret"`
+
+	// Username and Password are used by the "password" (ROPC) auth flow.
+	// Only suitable for environments without MFA enforcement.
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
 
 	// Dynamics 365 settings
 	CRMBaseURL string `mapstructure:"crm_base_url"` // e.g. https://yourorg.crm.dynamics.com
 	APIVersion string `mapstructure:"api_version"`  // default: 9.2
 
-	// Auth flow: "client_credentials" or "device_code"
+	// Auth flow:
+	//   device_code        - browser login, no app registration required (default)
+	//   password           - username/password (ROPC), no app registration required
+	//   client_credentials - service account, requires app registration + secret
 	AuthFlow string `mapstructure:"auth_flow"`
 }
 
+// WellKnownDynamicsCRMClientID is Microsoft's pre-registered public client for
+// Dynamics 365 SDK/PowerShell access. It supports device_code and password
+// flows without requiring your own app registration.
+const WellKnownDynamicsCRMClientID = "9cee029c-6210-4654-90bb-17e6e9d36617"
+
 const defaultAPIVersion = "9.2"
-const defaultAuthFlow = "client_credentials"
+const defaultAuthFlow = "device_code"
 
 // Load reads configuration from the config file and environment variables.
 // Priority: env vars > config file > defaults.
@@ -42,10 +62,11 @@ func Load() (*Config, error) {
 	viper.SetEnvPrefix("CRM")
 	viper.AutomaticEnv()
 
-	// Explicit env var bindings (CRM_TENANT_ID, CRM_CLIENT_ID, etc.)
 	_ = viper.BindEnv("tenant_id", "CRM_TENANT_ID")
 	_ = viper.BindEnv("client_id", "CRM_CLIENT_ID")
 	_ = viper.BindEnv("client_secret", "CRM_CLIENT_SECRET")
+	_ = viper.BindEnv("username", "CRM_USERNAME")
+	_ = viper.BindEnv("password", "CRM_PASSWORD")
 	_ = viper.BindEnv("crm_base_url", "CRM_BASE_URL")
 	_ = viper.BindEnv("api_version", "CRM_API_VERSION")
 	_ = viper.BindEnv("auth_flow", "CRM_AUTH_FLOW")
@@ -66,23 +87,48 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
 
+	// Apply well-known client ID if none provided
+	if cfg.ClientID == "" {
+		cfg.ClientID = WellKnownDynamicsCRMClientID
+	}
+
 	return &cfg, nil
 }
 
 // Validate checks that required fields are set.
 func (c *Config) Validate() error {
-	if c.TenantID == "" {
-		return fmt.Errorf("tenant_id is required (set CRM_TENANT_ID env var or config file)")
-	}
-	if c.ClientID == "" {
-		return fmt.Errorf("client_id is required (set CRM_CLIENT_ID env var or config file)")
-	}
 	if c.CRMBaseURL == "" {
-		return fmt.Errorf("crm_base_url is required (set CRM_BASE_URL env var or config file)")
+		return fmt.Errorf("crm_base_url is required (set CRM_BASE_URL env var or config file)\n" +
+			"  Example: CRM_BASE_URL=https://yourorg.crm.dynamics.com")
 	}
-	if c.AuthFlow == "client_credentials" && c.ClientSecret == "" {
-		return fmt.Errorf("client_secret is required for client_credentials auth flow (set CRM_CLIENT_SECRET)")
+
+	switch c.AuthFlow {
+	case "device_code":
+		// Only needs tenant_id (can be "common") and client_id (defaulted above)
+		if c.TenantID == "" {
+			c.TenantID = "common"
+		}
+	case "password":
+		if c.Username == "" {
+			return fmt.Errorf("username is required for password auth flow (set CRM_USERNAME)")
+		}
+		if c.Password == "" {
+			return fmt.Errorf("password is required for password auth flow (set CRM_PASSWORD)")
+		}
+		if c.TenantID == "" {
+			c.TenantID = "common"
+		}
+	case "client_credentials":
+		if c.TenantID == "" {
+			return fmt.Errorf("tenant_id is required for client_credentials auth flow (set CRM_TENANT_ID)")
+		}
+		if c.ClientSecret == "" {
+			return fmt.Errorf("client_secret is required for client_credentials auth flow (set CRM_CLIENT_SECRET)")
+		}
+	default:
+		return fmt.Errorf("unsupported auth_flow %q (choose: device_code, password, client_credentials)", c.AuthFlow)
 	}
+
 	return nil
 }
 

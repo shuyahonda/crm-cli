@@ -4,10 +4,9 @@
       "command": "crm-cli",
       "args": ["mcp"],
       "env": {
-        "CRM_TENANT_ID": "${env:CRM_TENANT_ID}",
-        "CRM_CLIENT_ID": "${env:CRM_CLIENT_ID}",
-        "CRM_CLIENT_SECRET": "${env:CRM_CLIENT_SECRET}",
-        "CRM_BASE_URL": "${env:CRM_BASE_URL}"
+        "CRM_BASE_URL": "${env:CRM_BASE_URL}",
+        "CRM_AUTH_FLOW": "device_code",
+        "CRM_TENANT_ID": "${env:CRM_TENANT_ID}"
       }
     }
   }

@@ -1,24 +1,43 @@
 # crm-cli configuration file
 # Place this file at:
 #   - ./crm-cli.yaml  (current directory)
-#   - ~/.config/crm-cli/crm-cli.yaml  (user home)
+#   - %USERPROFILE%\.config\crm-cli\crm-cli.yaml  (Windows user home)
 #
-# Environment variables take precedence over this file.
-# All values can be set via env vars with the CRM_ prefix:
-#   CRM_TENANT_ID, CRM_CLIENT_ID, CRM_CLIENT_SECRET, CRM_BASE_URL
+# Environment variables take precedence (CRM_ prefix):
+#   CRM_BASE_URL, CRM_TENANT_ID, CRM_USERNAME, CRM_PASSWORD, CRM_AUTH_FLOW
 
-# Azure AD (Entra ID) settings
-tenant_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-client_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-client_secret: "your-client-secret-here"
-
-# Dynamics 365 environment URL (no trailing slash)
+# Dynamics 365 environment URL (required, no trailing slash)
 crm_base_url: "https://yourorg.crm.dynamics.com"
 
-# Web API version (default: 9.2)
-api_version: "9.2"
+# =============================================================================
+# OPTION 1: Device Code Flow (recommended — no app registration required)
+# =============================================================================
+# Open a browser, sign in with your Microsoft/CRM account.
+# Uses Microsoft's pre-registered Dynamics CRM public client automatically.
+#
+auth_flow: "device_code"
+# tenant_id is optional — use your domain or GUID, or omit to use "common"
+# tenant_id: "yourorg.onmicrosoft.com"
 
-# Authentication flow:
-#   client_credentials - service-to-service (requires client_secret)
-#   device_code        - interactive browser login (no client_secret needed)
-auth_flow: "client_credentials"
+# =============================================================================
+# OPTION 2: Username / Password (no app registration required, no MFA)
+# =============================================================================
+# Direct credential login. Does NOT work if MFA is enforced on your account.
+#
+# auth_flow: "password"
+# username: "yourname@yourorg.onmicrosoft.com"
+# password: "your-password"
+# tenant_id: "yourorg.onmicrosoft.com"   # optional
+
+# =============================================================================
+# OPTION 3: Client Credentials (requires app registration by admin)
+# =============================================================================
+# Service-to-service, no user interaction. Requires admin to register an app.
+#
+# auth_flow: "client_credentials"
+# tenant_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# client_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# client_secret: "your-client-secret"
+
+# Web API version (default: 9.2, usually no need to change)
+# api_version: "9.2"
