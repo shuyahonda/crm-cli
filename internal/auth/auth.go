@@ -1,249 +1,171 @@
+// Package auth handles Azure AD / Entra ID authentication for Dynamics 365.
+// It uses the official Microsoft Authentication Library (MSAL) for Go:
+// https://github.com/AzureAD/microsoft-authentication-library-for-go
+//
+// Supported flows:
+//   - device_code        — browser login, no app registration required
+//   - password (ROPC)    — username/password, no app registration required
+//   - client_credentials — service account, requires app registration
 package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
-	"sync"
-	"time"
+
+	"github.com/AzureAD/microsoft-authentication-library-for-go/apps/confidential"
+	"github.com/AzureAD/microsoft-authentication-library-for-go/apps/public"
 
 	"github.com/shuyahonda/crm-cli/internal/config"
 )
 
-// TokenResponse represents the Azure AD OAuth2 token response.
-type TokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
-	Scope       string `json:"scope"`
-}
-
-// DeviceCodeResponse represents the device code flow initiation response.
-type DeviceCodeResponse struct {
-	DeviceCode      string `json:"device_code"`
-	UserCode        string `json:"user_code"`
-	VerificationURL string `json:"verification_uri"`
-	ExpiresIn       int    `json:"expires_in"`
-	Interval        int    `json:"interval"`
-	Message         string `json:"message"`
-}
-
-// Provider manages OAuth2 tokens with automatic refresh.
+// Provider acquires and caches OAuth2 tokens via MSAL.
 type Provider struct {
-	cfg         *config.Config
-	mu          sync.Mutex
-	token       string
-	tokenExpiry time.Time
+	cfg   *config.Config
+	cache *fileCache
 }
 
-// NewProvider creates a new auth provider.
+// NewProvider creates a new MSAL-backed auth provider.
 func NewProvider(cfg *config.Config) *Provider {
-	return &Provider{cfg: cfg}
+	return &Provider{
+		cfg:   cfg,
+		cache: newFileCache(),
+	}
 }
 
-// GetToken returns a valid access token, refreshing if necessary.
+// GetToken returns a valid access token for Dynamics 365.
+// Tokens are cached on disk; silent acquisition is attempted first.
 func (p *Provider) GetToken(ctx context.Context) (string, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Return cached token if still valid (with 60s buffer)
-	if p.token != "" && time.Now().Add(60*time.Second).Before(p.tokenExpiry) {
-		return p.token, nil
-	}
-
 	switch p.cfg.AuthFlow {
-	case "client_credentials":
-		return p.fetchClientCredentialsToken(ctx)
 	case "device_code":
-		return p.fetchDeviceCodeToken(ctx)
+		return p.tokenViaDeviceCode(ctx)
 	case "password":
-		return p.fetchPasswordToken(ctx)
+		return p.tokenViaPassword(ctx)
+	case "client_credentials":
+		return p.tokenViaClientCredentials(ctx)
 	default:
-		return "", fmt.Errorf("unsupported auth flow: %s", p.cfg.AuthFlow)
+		return "", fmt.Errorf("unsupported auth_flow: %q", p.cfg.AuthFlow)
 	}
 }
 
-// fetchClientCredentialsToken fetches a token using the client credentials flow.
-// Requires an app registration with client secret.
-func (p *Provider) fetchClientCredentialsToken(ctx context.Context) (string, error) {
-	tokenURL := fmt.Sprintf(
-		"https://login.microsoftonline.com/%s/oauth2/v2.0/token",
-		p.cfg.TenantID,
-	)
-
-	scope := fmt.Sprintf("%s/.default", strings.TrimRight(p.cfg.CRMBaseURL, "/"))
-
-	resp, err := postForm(ctx, tokenURL, url.Values{
-		"grant_type":    {"client_credentials"},
-		"client_id":     {p.cfg.ClientID},
-		"client_secret": {p.cfg.ClientSecret},
-		"scope":         {scope},
-	})
-	if err != nil {
-		return "", fmt.Errorf("client_credentials token request failed: %w", err)
-	}
-
-	p.token = resp.AccessToken
-	p.tokenExpiry = time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second)
-	return p.token, nil
+// scopes returns the Dynamics 365 delegated permission scope.
+func (p *Provider) scopes() []string {
+	base := strings.TrimRight(p.cfg.CRMBaseURL, "/")
+	return []string{base + "/user_impersonation"}
 }
 
-// fetchDeviceCodeToken fetches a token using the device code flow.
-// Does NOT require an app registration — uses Microsoft's well-known
-// Dynamics CRM public client ID by default.
-func (p *Provider) fetchDeviceCodeToken(ctx context.Context) (string, error) {
-	deviceCodeURL := fmt.Sprintf(
-		"https://login.microsoftonline.com/%s/oauth2/v2.0/devicecode",
-		p.cfg.TenantID,
+// authority returns the Azure AD authority URL for the configured tenant.
+func (p *Provider) authority() string {
+	return "https://login.microsoftonline.com/" + p.cfg.TenantID
+}
+
+// tokenViaDeviceCode acquires a token using the device code flow.
+// Uses a file cache so the user only authenticates once (refresh token lasts ~90 days).
+func (p *Provider) tokenViaDeviceCode(ctx context.Context) (string, error) {
+	app, err := public.New(p.cfg.ClientID,
+		public.WithAuthority(p.authority()),
+		public.WithCache(p.cache),
 	)
-	tokenURL := fmt.Sprintf(
-		"https://login.microsoftonline.com/%s/oauth2/v2.0/token",
-		p.cfg.TenantID,
+	if err != nil {
+		return "", fmt.Errorf("MSAL: failed to create public client: %w", err)
+	}
+
+	scopes := p.scopes()
+
+	// Try silent acquisition first (uses cached refresh token)
+	accounts, err := app.Accounts(ctx)
+	if err == nil && len(accounts) > 0 {
+		result, err := app.AcquireTokenSilent(ctx, scopes,
+			public.WithSilentAccount(accounts[0]))
+		if err == nil {
+			return result.AccessToken, nil
+		}
+		// Silent failed — fall through to interactive
+	}
+
+	// Interactive device code flow
+	dc, err := app.AcquireTokenByDeviceCode(ctx, scopes)
+	if err != nil {
+		return "", fmt.Errorf("MSAL: device code initiation failed: %w", err)
+	}
+
+	// Print the user message (e.g. "Go to https://... and enter code XXXXX")
+	fmt.Fprintf(os.Stderr, "\n%s\n\n", dc.Result.Message)
+
+	result, err := dc.AuthenticationResult(ctx)
+	if err != nil {
+		return "", fmt.Errorf("MSAL: device code authentication failed: %w", err)
+	}
+
+	return result.AccessToken, nil
+}
+
+// tokenViaPassword acquires a token using username/password (ROPC).
+// Does not work when MFA is enforced on the account.
+func (p *Provider) tokenViaPassword(ctx context.Context) (string, error) {
+	app, err := public.New(p.cfg.ClientID,
+		public.WithAuthority(p.authority()),
+		public.WithCache(p.cache),
 	)
-
-	scope := fmt.Sprintf("%s/user_impersonation openid profile", strings.TrimRight(p.cfg.CRMBaseURL, "/"))
-
-	// Step 1: Request device code
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, deviceCodeURL,
-		strings.NewReader(url.Values{
-			"client_id": {p.cfg.ClientID},
-			"scope":     {scope},
-		}.Encode()))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("MSAL: failed to create public client: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	deviceResp, err := httpClient.Do(req)
+	scopes := p.scopes()
+
+	// Try silent acquisition first
+	accounts, err := app.Accounts(ctx)
+	if err == nil {
+		for _, account := range accounts {
+			if strings.EqualFold(account.PreferredUsername, p.cfg.Username) {
+				result, err := app.AcquireTokenSilent(ctx, scopes,
+					public.WithSilentAccount(account))
+				if err == nil {
+					return result.AccessToken, nil
+				}
+				break
+			}
+		}
+	}
+
+	result, err := app.AcquireTokenByUsernamePassword(ctx, scopes,
+		p.cfg.Username, p.cfg.Password)
 	if err != nil {
-		return "", fmt.Errorf("device code request failed: %w", err)
-	}
-	defer deviceResp.Body.Close()
-
-	body, _ := io.ReadAll(deviceResp.Body)
-	var dcResp DeviceCodeResponse
-	if err := json.Unmarshal(body, &dcResp); err != nil {
-		return "", fmt.Errorf("failed to parse device code response: %w", err)
-	}
-	if dcResp.DeviceCode == "" {
-		// Surface the error message from Azure AD
-		var azErr struct {
-			Error            string `json:"error"`
-			ErrorDescription string `json:"error_description"`
-		}
-		_ = json.Unmarshal(body, &azErr)
-		return "", fmt.Errorf("device code request failed: %s — %s", azErr.Error, azErr.ErrorDescription)
+		return "", fmt.Errorf("MSAL: password authentication failed: %w\n"+
+			"  Hint: if MFA is enforced on your account, use auth_flow: device_code", err)
 	}
 
-	// Show user the authentication prompt
-	fmt.Fprintf(os.Stderr, "\n%s\n\n", dcResp.Message)
+	return result.AccessToken, nil
+}
 
-	// Step 2: Poll for token
-	interval := time.Duration(dcResp.Interval) * time.Second
-	if interval == 0 {
-		interval = 5 * time.Second
+// tokenViaClientCredentials acquires a token using the client credentials flow.
+// Requires an Azure AD app registration with a client secret.
+func (p *Provider) tokenViaClientCredentials(ctx context.Context) (string, error) {
+	cred, err := confidential.NewCredFromSecret(p.cfg.ClientSecret)
+	if err != nil {
+		return "", fmt.Errorf("MSAL: invalid client secret: %w", err)
 	}
 
-	deadline := time.Now().Add(time.Duration(dcResp.ExpiresIn) * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(interval):
-		}
+	app, err := confidential.New(p.authority(), p.cfg.ClientID, cred,
+		confidential.WithCache(p.cache),
+	)
+	if err != nil {
+		return "", fmt.Errorf("MSAL: failed to create confidential client: %w", err)
+	}
 
-		resp, err := postForm(ctx, tokenURL, url.Values{
-			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
-			"client_id":   {p.cfg.ClientID},
-			"device_code": {dcResp.DeviceCode},
-		})
+	// Dynamics 365 client credentials scope uses /.default
+	base := strings.TrimRight(p.cfg.CRMBaseURL, "/")
+	scopes := []string{base + "/.default"}
+
+	result, err := app.AcquireTokenSilent(ctx, scopes)
+	if err != nil {
+		// Silent failed — acquire fresh token
+		result, err = app.AcquireTokenByCredential(ctx, scopes)
 		if err != nil {
-			// "authorization_pending" / "slow_down" are expected during polling
-			continue
+			return "", fmt.Errorf("MSAL: client credentials token acquisition failed: %w", err)
 		}
-
-		p.token = resp.AccessToken
-		p.tokenExpiry = time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second)
-		return p.token, nil
 	}
 
-	return "", fmt.Errorf("device code authentication timed out — please try again")
-}
-
-// fetchPasswordToken fetches a token using the Resource Owner Password
-// Credentials (ROPC) flow. Does NOT require an app registration when used
-// with the well-known Dynamics CRM public client ID.
-//
-// Note: This flow does not work if MFA is enforced on the account.
-func (p *Provider) fetchPasswordToken(ctx context.Context) (string, error) {
-	tokenURL := fmt.Sprintf(
-		"https://login.microsoftonline.com/%s/oauth2/v2.0/token",
-		p.cfg.TenantID,
-	)
-
-	scope := fmt.Sprintf("%s/user_impersonation openid profile", strings.TrimRight(p.cfg.CRMBaseURL, "/"))
-
-	resp, err := postForm(ctx, tokenURL, url.Values{
-		"grant_type": {"password"},
-		"client_id":  {p.cfg.ClientID},
-		"username":   {p.cfg.Username},
-		"password":   {p.cfg.Password},
-		"scope":      {scope},
-	})
-	if err != nil {
-		return "", fmt.Errorf("password auth failed: %w\n" +
-			"  Hint: if MFA is enforced on your account, use auth_flow: device_code instead")
-	}
-
-	p.token = resp.AccessToken
-	p.tokenExpiry = time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second)
-	return p.token, nil
-}
-
-// postForm sends a POST request with form data and parses the token response.
-func postForm(ctx context.Context, tokenURL string, data url.Values) (*TokenResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL,
-		strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	// Check for OAuth error before checking status code
-	var errResp struct {
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description"`
-	}
-	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
-		if errResp.Error == "authorization_pending" || errResp.Error == "slow_down" {
-			return nil, fmt.Errorf("%s", errResp.Error)
-		}
-		return nil, fmt.Errorf("%s: %s", errResp.Error, errResp.ErrorDescription)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token endpoint returned HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var tokenResp TokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to parse token response: %w", err)
-	}
-
-	return &tokenResp, nil
+	return result.AccessToken, nil
 }
